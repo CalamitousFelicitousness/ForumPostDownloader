@@ -2339,6 +2339,31 @@ const ui = {
           </form>
           `;
                 },
+                /**
+         * Parallel posts setting and, on threads with more than one page, the page range controls.
+         * @param {number} currentPage
+         * @param {number} lastPage
+         * @param {number} parallelPosts
+         * @returns {string}
+         */
+                createRunOptions: (currentPage, lastPage, parallelPosts) => {
+                    const numberInput = (id, value, max) =>
+                        `<input id="${id}" type="number" class="input" min="1" max="${max}" value="${value}" style="width: 64px; display: inline-block;" />`;
+
+                    const parallelRow = ui.forms.createRow(`${ui.forms.createLabel('Parallel Posts')} ${numberInput('config-parallel-posts', parallelPosts, PARALLEL_POSTS_MAX)}`);
+                    if (lastPage < 2) {
+                        return parallelRow;
+                    }
+
+                    const pagesRow = ui.forms.createRow(`
+            ${ui.forms.createLabel('Pages')}
+            ${numberInput('config-pages-from', currentPage, lastPage)} to ${numberInput('config-pages-to', lastPage, lastPage)} of ${lastPage}
+            <div style="margin-top: 8px;">
+              <a href="#" id="config-download-pages" class="button button--link">🡳 Download Pages</a>
+            </div>
+          `);
+                    return parallelRow + pagesRow;
+                },
             },
             post: {
                 /**
@@ -8943,8 +8968,8 @@ const addDownloadPageButton = () => {
 };
 
 /**
- * Tab title while a Download Page run is in progress and after it finishes.
- * @param {{done: number, total: number, incomplete: number, finished: boolean}} state
+ * Tab title while a page download run is in progress and after it finishes.
+ * @param {{done: number, total: number, incomplete: number, failedPages: number[], finished: boolean}} state
  * @param {string} baseTitle document.title before the run started
  * @returns {string}
  */
@@ -8952,8 +8977,8 @@ const formatPageTitle = (state, baseTitle) => {
     if (!state.finished) {
         return `[${state.done}/${state.total}] ${baseTitle}`;
     }
-    if (state.incomplete) {
-        return `[⚠ ${state.incomplete} incomplete] ${baseTitle}`;
+    if (state.incomplete || state.failedPages.length) {
+        return `[⚠ ${state.done}/${state.total}] ${baseTitle}`;
     }
     return `[✓ ${state.done}/${state.total}] ${baseTitle}`;
 };
@@ -8961,16 +8986,16 @@ const formatPageTitle = (state, baseTitle) => {
 let pageProgress = null;
 
 /**
- * Floating panel tracking a Download Page run. Each row mirrors that post's own status label;
- * posts the script leaves flagged as partial stay listed once they finish.
- * @param selected selectedPosts entries being downloaded
- * @returns {{finish: function(*): void, isRunning: function(): boolean, close: function(): void}}
+ * Floating panel tracking a page download run. Rows appear as posts start and mirror each post's
+ * own status label; posts the script leaves flagged as partial stay listed once they finish.
+ * @param {string} title panel heading
+ * @returns {{add, setFetching, pageFailed, start, finish, end, isRunning, close}}
  */
-const createPageProgressPanel = selected => {
+const createPageProgressPanel = title => {
     if (pageProgress) pageProgress.close();
 
     const baseTitle = document.title;
-    const state = { done: 0, total: selected.length, incomplete: 0, finished: false };
+    const state = { done: 0, total: 0, incomplete: 0, failedPages: [], fetching: '', finished: false };
 
     const panel = document.createElement('div');
     h.ui.setElProps(panel, {
@@ -9004,47 +9029,28 @@ const createPageProgressPanel = selected => {
     const bar = ui.pBars.base('#46658b', '4px');
     track.append(bar);
 
+    const fetchLine = document.createElement('div');
+    fetchLine.style.marginBottom = '4px';
+
     const summary = document.createElement('div');
     h.ui.setElProps(summary, { color: '#e8a838', marginBottom: '4px' });
 
     const list = document.createElement('div');
-    panel.append(header, track, summary, list);
+    panel.append(header, track, fetchLine, summary, list);
 
     const rows = new Map();
-    selected.forEach(s => {
-        const { postId, postNumber, contentContainer } = s.post.parsedPost;
-        const label = s.post.statusUI.status;
-
-        const row = document.createElement('div');
-        h.ui.setElProps(row, { display: 'flex', gap: '8px', cursor: 'pointer', whiteSpace: 'nowrap' });
-        const num = document.createElement('span');
-        num.style.minWidth = '44px';
-        num.textContent = `#${postNumber}`;
-        const text = document.createElement('span');
-        h.ui.setElProps(text, { overflow: 'hidden', textOverflow: 'ellipsis' });
-        row.append(num, text);
-        row.addEventListener('click', () => contentContainer.scrollIntoView({ behavior: 'smooth', block: 'center' }));
-
-        // Label text is "<progress> 🢒 <host/url details>"; only the progress part fits a row.
-        // downloadPost hides the label after the last file, so hidden means zipping or saving.
-        const sync = () => {
-            const progress = label.textContent.split('🢒')[0].trim();
-            h.ui.setText(text, label.style.display === 'none' ? 'Saving...' : progress);
-        };
-        const observer = new MutationObserver(sync);
-        observer.observe(label, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['style'] });
-        sync();
-
-        list.append(row);
-        rows.set(postId, { row, text, label, observer, sync });
-    });
 
     const render = () => {
-        h.ui.setText(heading, state.finished ? 'Page download finished' : 'Page download');
+        h.ui.setText(heading, state.finished ? `${title} finished` : title);
         h.ui.setText(count, `${state.done} / ${state.total}`);
-        bar.style.width = `${(state.done / state.total) * 100}%`;
-        h.ui.setText(summary, `${state.incomplete} post(s) incomplete`);
-        summary.style.display = state.incomplete ? 'block' : 'none';
+        bar.style.width = `${state.total ? (state.done / state.total) * 100 : 0}%`;
+        h.ui.setText(fetchLine, state.fetching);
+        fetchLine.style.display = state.fetching ? 'block' : 'none';
+        const problems = [];
+        if (state.incomplete) problems.push(`${state.incomplete} post(s) incomplete`);
+        if (state.failedPages.length) problems.push(`page(s) ${state.failedPages.join(', ')} failed to load`);
+        h.ui.setText(summary, problems.join(' · '));
+        summary.style.display = problems.length ? 'block' : 'none';
         closeBtn.style.display = state.finished ? 'inline' : 'none';
         document.title = formatPageTitle(state, baseTitle);
     };
@@ -9065,9 +9071,55 @@ const createPageProgressPanel = selected => {
     document.body.append(panel);
 
     pageProgress = {
+        add: n => {
+            state.total += n;
+            render();
+        },
+        setFetching: text => {
+            state.fetching = text;
+            render();
+        },
+        pageFailed: pageNumber => {
+            state.failedPages.push(pageNumber);
+            render();
+        },
+        start: entry => {
+            const { postId, postNumber, contentContainer } = entry.parsedPost;
+            const label = entry.statusUI.status;
+
+            const row = document.createElement('div');
+            h.ui.setElProps(row, { display: 'flex', gap: '8px', cursor: 'pointer', whiteSpace: 'nowrap' });
+            const num = document.createElement('span');
+            num.style.minWidth = '44px';
+            num.textContent = `#${postNumber}`;
+            const text = document.createElement('span');
+            h.ui.setElProps(text, { overflow: 'hidden', textOverflow: 'ellipsis' });
+            row.append(num, text);
+            // Posts from fetched pages are not in this document; open them instead.
+            row.addEventListener('click', () => {
+                if (contentContainer.isConnected) {
+                    contentContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                } else {
+                    window.open(`/posts/${postId}/`, '_blank');
+                }
+            });
+
+            // Label text is "<progress> 🢒 <host/url details>"; only the progress part fits a row.
+            // downloadPost hides the label after the last file, so hidden means zipping or saving.
+            const sync = () => {
+                const progress = label.textContent.split('🢒')[0].trim();
+                h.ui.setText(text, label.style.display === 'none' ? 'Saving...' : progress);
+            };
+            const observer = new MutationObserver(sync);
+            observer.observe(label, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+            sync();
+
+            list.append(row);
+            rows.set(postId, { row, text, label, observer, sync });
+        },
         // A post still showing its label after downloadPost settles was left partial by it.
-        finish: s => {
-            const r = rows.get(s.post.parsedPost.postId);
+        finish: entry => {
+            const r = rows.get(entry.parsedPost.postId);
             r.observer.disconnect();
             state.done++;
             if (r.label.style.display === 'none') {
@@ -9077,7 +9129,11 @@ const createPageProgressPanel = selected => {
                 r.sync();
                 r.text.style.color = '#e8a838';
             }
-            state.finished = state.done === state.total;
+            render();
+        },
+        end: () => {
+            state.finished = true;
+            state.fetching = '';
             render();
         },
         isRunning: () => !state.finished,
@@ -9085,6 +9141,168 @@ const createPageProgressPanel = selected => {
     };
 
     return pageProgress;
+};
+
+const PARALLEL_POSTS_KEY = 'parallel_posts';
+const PARALLEL_POSTS_DEFAULT = 3;
+const PARALLEL_POSTS_MAX = 10;
+const PAGE_FETCH_DELAY_MS = 1500;
+
+// parseInt, not Number: a cleared or invalid number input reports '', which Number reads as 0.
+const clampParallelPosts = value => {
+    const n = parseInt(value, 10);
+    return Number.isFinite(n) ? Math.min(PARALLEL_POSTS_MAX, Math.max(1, n)) : PARALLEL_POSTS_DEFAULT;
+};
+
+const getParallelPosts = () => clampParallelPosts(GM_getValue(PARALLEL_POSTS_KEY, PARALLEL_POSTS_DEFAULT));
+
+/**
+ * Runs post downloads at most `limit` at a time and mirrors them into a progress panel.
+ * Entries can be added while it runs; close() marks that no more will come.
+ * @param {number} limit
+ * @param progress createPageProgressPanel result
+ */
+const createDownloadQueue = (limit, progress) => {
+    const pending = [];
+    let active = 0;
+    let closed = false;
+
+    const pump = () => {
+        while (active < limit && pending.length) {
+            const entry = pending.shift();
+            active++;
+            const run = downloadPost(
+                entry.parsedPost,
+                entry.parsedHosts,
+                entry.enabledHostsCB,
+                entry.resolvers,
+                entry.getSettingsCB,
+                entry.statusUI,
+                entry.postDownloadCallbacks,
+            );
+            // downloadPost shows "Resolving..." before its first await, so the row starts with real text.
+            progress.start(entry);
+            run.catch(err => console.error(err)).finally(() => {
+                active--;
+                progress.finish(entry);
+                pump();
+            });
+        }
+
+        if (closed && !active && !pending.length && progress.isRunning()) {
+            progress.end();
+        }
+    };
+
+    return {
+        add: entries => {
+            pending.push(...entries);
+            progress.add(entries.length);
+            pump();
+        },
+        close: () => {
+            closed = true;
+            pump();
+        },
+    };
+};
+
+// Thread pages live at <base>/page-N; page 1 is <base> itself.
+const threadPages = {
+    base: () => location.pathname.replace(/\/page-\d+\/?$/, '/').replace(/\/?$/, '/'),
+    current: () => Number((/\/page-(\d+)/.exec(location.pathname) || [])[1] || 1),
+    last: () => Number((h.element('.pageNav-main li:last-child a') || {}).textContent) || 1,
+    url: pageNumber => (pageNumber === 1 ? threadPages.base() : `${threadPages.base()}page-${pageNumber}`),
+};
+
+const createPostSettings = () => ({
+    zipped: true,
+    flatten: false,
+    generateLinks: false,
+    generateLog: false,
+    skipDuplicates: false,
+    skipDownload: false,
+    verifyBunkrLinks: false,
+    output: [],
+});
+
+/**
+ * Fetches another page of this thread and returns its posts with links, shaped like parsedPosts
+ * entries. Same-origin fetch carries the forum's first-party cookies, as in the Goonbox bridge.
+ * @param {number} pageNumber
+ */
+const fetchThreadPagePosts = async pageNumber => {
+    const response = await fetch(threadPages.url(pageNumber), { credentials: 'include' });
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+
+    const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+    const posts = [...doc.querySelectorAll('.message-attribution-opposite')];
+    // A challenge or error page still answers 200 but has no posts.
+    if (!posts.length) {
+        throw new Error('response contains no posts');
+    }
+
+    return posts
+        .map(post => {
+            const parsedPost = parsers.thread.parsePost(post);
+            const postSettings = createPostSettings();
+            return {
+                parsedPost,
+                parsedHosts: parsers.hosts.parseHosts(parsedPost.content),
+                enabledHostsCB: parsedHosts => parsedHosts.filter(host => host.enabled),
+                resolvers,
+                getSettingsCB: () => postSettings,
+                statusUI: {
+                    status: ui.labels.status.createStatusLabel().el,
+                    filePB: ui.pBars.createFileProgressBar(),
+                    totalPB: ui.pBars.createTotalProgressBar(),
+                },
+                postDownloadCallbacks: {
+                    onComplete: (total, completed) => {
+                        if (total > 0 && completed > 0) {
+                            registerPostReactionByRequest(parsedPost.footer);
+                        }
+                    },
+                },
+            };
+        })
+        .filter(entry => entry.parsedHosts.length);
+};
+
+/**
+ * Downloads every post with links on pages `from`..`to`. Pages are fetched one at a time with a
+ * pause between them; the current page uses its already parsed posts.
+ * @param {number} from
+ * @param {number} to
+ */
+const downloadPages = async (from, to) => {
+    const progress = createPageProgressPanel(from === to ? `Page ${from}` : `Pages ${from}-${to}`);
+    const queue = createDownloadQueue(getParallelPosts(), progress);
+    const current = threadPages.current();
+
+    for (let pageNumber = from; pageNumber <= to; pageNumber++) {
+        if (pageNumber === current) {
+            queue.add(parsedPosts.filter(p => p.parsedHosts.length));
+            continue;
+        }
+
+        progress.setFetching(`Fetching page ${pageNumber} of ${to}...`);
+        try {
+            queue.add(await fetchThreadPagePosts(pageNumber));
+        } catch (e) {
+            console.error(`Could not load page ${pageNumber}:`, e);
+            progress.pageFailed(pageNumber);
+        }
+
+        if (pageNumber < to) {
+            await h.delayedResolve(PAGE_FETCH_DELAY_MS);
+        }
+    }
+
+    progress.setFetching('');
+    queue.close();
 };
 
 /**
@@ -9098,6 +9316,39 @@ const registerPostReaction = postFooter => {
             reactionAnchor.setAttribute('href', reactionAnchor.getAttribute('href').replace('_id=1', '_id=33'));
             reactionAnchor.click();
         }
+    }
+};
+
+/**
+ * registerPostReaction for a post parsed from a fetched page, where clicking does nothing.
+ * Sends the request XenForo's reaction click would send.
+ * @param postFooter
+ */
+const registerPostReactionByRequest = async postFooter => {
+    // Reacting again with the same reaction removes it.
+    if (postFooter.querySelector('.has-reaction')) return;
+
+    const reactionAnchor = postFooter.querySelector('.reaction--imageHidden');
+    if (!reactionAnchor) return;
+
+    const url = reactionAnchor.getAttribute('href').replace('_id=1', '_id=33');
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            credentials: 'include',
+            body: new URLSearchParams({
+                _xfResponseType: 'json',
+                _xfWithData: '1',
+                _xfRequestUri: location.pathname,
+                _xfToken: document.documentElement.dataset.csrf,
+            }),
+        });
+        const json = await response.json();
+        if (json.reactionId !== 33) {
+            console.error(`Reaction not applied for ${url}:`, json);
+        }
+    } catch (e) {
+        console.error(`Reaction request failed for ${url}:`, e);
     }
 };
 
@@ -9220,7 +9471,8 @@ const selectedPosts = [];
     } catch (e) {}
 
     window.addEventListener('beforeunload', e => {
-        if (processing.find(p => p.processing)) {
+        // A page run can be between posts (fetching or queued) with nothing processing.
+        if (processing.find(p => p.processing) || (pageProgress && pageProgress.isRunning())) {
             const message = 'Downloads are in progress. Sure you wanna exit this page?';
             e.returnValue = message;
             return message;
@@ -9246,15 +9498,7 @@ const selectedPosts = [];
         init.injectCustomStyles();
 
         h.elements('.message-attribution-opposite').forEach(post => {
-            const settings = {
-                zipped: true,
-                flatten: false,
-                generateLinks: false,
-                generateLog: false,
-                skipDuplicates: false,
-                skipDownload: false,
-                verifyBunkrLinks: false,                output: [],
-            };
+            const settings = createPostSettings();
 
             const parsedPost = parsers.thread.parsePost(post);
 
@@ -9347,30 +9591,14 @@ const selectedPosts = [];
             btnDownloadPage.addEventListener('click', e => {
                 e.preventDefault();
 
-                const selected = selectedPosts.filter(s => s.enabled);
+                const selected = selectedPosts.filter(s => s.enabled).map(s => s.post);
                 if (!selected.length || (pageProgress && pageProgress.isRunning())) {
                     return;
                 }
 
-                // Start every download before building the panel so each row's first sync
-                // already sees the post's "Resolving..." label rather than the hidden idle one.
-                const runs = selected.map(s => ({
-                    s,
-                    run: downloadPost(
-                        s.post.parsedPost,
-                        s.post.parsedHosts,
-                        s.post.enabledHostsCB,
-                        s.post.resolvers,
-                        s.post.getSettingsCB,
-                        s.post.statusUI,
-                        s.post.postDownloadCallbacks,
-                    ),
-                }));
-
-                const progress = createPageProgressPanel(selected);
-                runs.forEach(({ s, run }) => {
-                    run.catch(err => console.error(err)).finally(() => progress.finish(s));
-                });
+                const queue = createDownloadQueue(getParallelPosts(), createPageProgressPanel('Page download'));
+                queue.add(selected);
+                queue.close();
             });
 
             // TODO: Extract to ui.js
@@ -9396,10 +9624,45 @@ const selectedPosts = [];
             });
 
             html = `${ui.forms.createRow(ui.forms.createLabel('Post Selection'))} ${html}`;
-            ui.tooltip(btnDownloadPage, ui.forms.config.page.createForm(color, html), {
+            html += ui.forms.config.page.createRunOptions(threadPages.current(), threadPages.last(), getParallelPosts());
+            const pageTooltip = ui.tooltip(btnDownloadPage, ui.forms.config.page.createForm(color, html), {
                 placement: 'bottom',
                 interactive: true,
                 onShown: () => {
+                    // The form element survives hide/show, so its listeners are bound once.
+                    const form = h.element('#downloader-page-config-form');
+                    if (!form.dataset.runOptionsBound) {
+                        form.dataset.runOptionsBound = '1';
+                        form.addEventListener('submit', e => e.preventDefault());
+
+                        h.element('#config-parallel-posts').addEventListener('change', e => {
+                            const value = clampParallelPosts(e.target.value);
+                            e.target.value = value;
+                            GM_setValue(PARALLEL_POSTS_KEY, value);
+                        });
+
+                        const downloadPagesBtn = h.element('#config-download-pages');
+                        if (downloadPagesBtn) {
+                            downloadPagesBtn.addEventListener('click', e => {
+                                e.preventDefault();
+                                if (pageProgress && pageProgress.isRunning()) {
+                                    return;
+                                }
+
+                                const lastPage = threadPages.last();
+                                const readPage = (id, fallback) => {
+                                    const n = parseInt(h.element(id).value, 10);
+                                    return Number.isFinite(n) ? Math.min(lastPage, Math.max(1, n)) : fallback;
+                                };
+                                const from = readPage('#config-pages-from', threadPages.current());
+                                const to = readPage('#config-pages-to', lastPage);
+
+                                pageTooltip.hide();
+                                downloadPages(Math.min(from, to), Math.max(from, to));
+                            });
+                        }
+                    }
+
                     parsedPosts
                         .filter(p => p.parsedHosts.length)
                         .forEach(post => {
