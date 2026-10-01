@@ -4,7 +4,7 @@
 // @namespace https://github.com/SkyCloudDev
 // @author SkyCloudDev
 // @description Downloads images and videos from posts
-// @version 3.23
+// @version 3.24
 // @updateURL https://github.com/SkyCloudDev/ForumPostDownloader/raw/main/dist/build.user.js
 // @downloadURL https://github.com/SkyCloudDev/ForumPostDownloader/raw/main/dist/build.user.js
 // @icon https://simp4.cuckcapital.cr/simpcityIcon192.png
@@ -8943,6 +8943,151 @@ const addDownloadPageButton = () => {
 };
 
 /**
+ * Tab title while a Download Page run is in progress and after it finishes.
+ * @param {{done: number, total: number, incomplete: number, finished: boolean}} state
+ * @param {string} baseTitle document.title before the run started
+ * @returns {string}
+ */
+const formatPageTitle = (state, baseTitle) => {
+    if (!state.finished) {
+        return `[${state.done}/${state.total}] ${baseTitle}`;
+    }
+    if (state.incomplete) {
+        return `[⚠ ${state.incomplete} incomplete] ${baseTitle}`;
+    }
+    return `[✓ ${state.done}/${state.total}] ${baseTitle}`;
+};
+
+let pageProgress = null;
+
+/**
+ * Floating panel tracking a Download Page run. Each row mirrors that post's own status label;
+ * posts the script leaves flagged as partial stay listed once they finish.
+ * @param selected selectedPosts entries being downloaded
+ * @returns {{finish: function(*): void, isRunning: function(): boolean, close: function(): void}}
+ */
+const createPageProgressPanel = selected => {
+    if (pageProgress) pageProgress.close();
+
+    const baseTitle = document.title;
+    const state = { done: 0, total: selected.length, incomplete: 0, finished: false };
+
+    const panel = document.createElement('div');
+    h.ui.setElProps(panel, {
+        position: 'fixed',
+        right: '16px',
+        bottom: '16px',
+        zIndex: '9999',
+        width: '300px',
+        maxHeight: '50vh',
+        overflowY: 'auto',
+        padding: '8px 10px',
+        background: ui.getTooltipBackgroundColor(),
+        color: document.documentElement.dataset.colorScheme === 'dark' ? '#d6d6d6' : '#1d1d1d',
+        fontSize: '12px',
+        borderRadius: '4px',
+        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.4)',
+    });
+
+    const header = document.createElement('div');
+    h.ui.setElProps(header, { display: 'flex', gap: '8px', fontWeight: 'bold', marginBottom: '4px' });
+    const heading = document.createElement('span');
+    heading.style.flex = '1';
+    const count = document.createElement('span');
+    const closeBtn = document.createElement('a');
+    closeBtn.setAttribute('href', '#');
+    closeBtn.textContent = '✕';
+    header.append(heading, count, closeBtn);
+
+    const track = ui.pBars.base('#545454', '4px', '100%');
+    track.style.marginBottom = '6px';
+    const bar = ui.pBars.base('#46658b', '4px');
+    track.append(bar);
+
+    const summary = document.createElement('div');
+    h.ui.setElProps(summary, { color: '#e8a838', marginBottom: '4px' });
+
+    const list = document.createElement('div');
+    panel.append(header, track, summary, list);
+
+    const rows = new Map();
+    selected.forEach(s => {
+        const { postId, postNumber, contentContainer } = s.post.parsedPost;
+        const label = s.post.statusUI.status;
+
+        const row = document.createElement('div');
+        h.ui.setElProps(row, { display: 'flex', gap: '8px', cursor: 'pointer', whiteSpace: 'nowrap' });
+        const num = document.createElement('span');
+        num.style.minWidth = '44px';
+        num.textContent = `#${postNumber}`;
+        const text = document.createElement('span');
+        h.ui.setElProps(text, { overflow: 'hidden', textOverflow: 'ellipsis' });
+        row.append(num, text);
+        row.addEventListener('click', () => contentContainer.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+
+        // Label text is "<progress> 🢒 <host/url details>"; only the progress part fits a row.
+        // downloadPost hides the label after the last file, so hidden means zipping or saving.
+        const sync = () => {
+            const progress = label.textContent.split('🢒')[0].trim();
+            h.ui.setText(text, label.style.display === 'none' ? 'Saving...' : progress);
+        };
+        const observer = new MutationObserver(sync);
+        observer.observe(label, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+        sync();
+
+        list.append(row);
+        rows.set(postId, { row, text, label, observer, sync });
+    });
+
+    const render = () => {
+        h.ui.setText(heading, state.finished ? 'Page download finished' : 'Page download');
+        h.ui.setText(count, `${state.done} / ${state.total}`);
+        bar.style.width = `${(state.done / state.total) * 100}%`;
+        h.ui.setText(summary, `${state.incomplete} post(s) incomplete`);
+        summary.style.display = state.incomplete ? 'block' : 'none';
+        closeBtn.style.display = state.finished ? 'inline' : 'none';
+        document.title = formatPageTitle(state, baseTitle);
+    };
+
+    const close = () => {
+        rows.forEach(r => r.observer.disconnect());
+        panel.remove();
+        document.title = baseTitle;
+        pageProgress = null;
+    };
+
+    closeBtn.addEventListener('click', e => {
+        e.preventDefault();
+        close();
+    });
+
+    render();
+    document.body.append(panel);
+
+    pageProgress = {
+        // A post still showing its label after downloadPost settles was left partial by it.
+        finish: s => {
+            const r = rows.get(s.post.parsedPost.postId);
+            r.observer.disconnect();
+            state.done++;
+            if (r.label.style.display === 'none') {
+                r.row.remove();
+            } else {
+                state.incomplete++;
+                r.sync();
+                r.text.style.color = '#e8a838';
+            }
+            state.finished = state.done === state.total;
+            render();
+        },
+        isRunning: () => !state.finished,
+        close,
+    };
+
+    return pageProgress;
+};
+
+/**
  * @param postFooter
  */
 const registerPostReaction = postFooter => {
@@ -9202,10 +9347,16 @@ const selectedPosts = [];
             btnDownloadPage.addEventListener('click', e => {
                 e.preventDefault();
 
-                selectedPosts
-                    .filter(s => s.enabled)
-                    .forEach(s => {
-                    downloadPost(
+                const selected = selectedPosts.filter(s => s.enabled);
+                if (!selected.length || (pageProgress && pageProgress.isRunning())) {
+                    return;
+                }
+
+                // Start every download before building the panel so each row's first sync
+                // already sees the post's "Resolving..." label rather than the hidden idle one.
+                const runs = selected.map(s => ({
+                    s,
+                    run: downloadPost(
                         s.post.parsedPost,
                         s.post.parsedHosts,
                         s.post.enabledHostsCB,
@@ -9213,7 +9364,12 @@ const selectedPosts = [];
                         s.post.getSettingsCB,
                         s.post.statusUI,
                         s.post.postDownloadCallbacks,
-                    );
+                    ),
+                }));
+
+                const progress = createPageProgressPanel(selected);
+                runs.forEach(({ s, run }) => {
+                    run.catch(err => console.error(err)).finally(() => progress.finish(s));
                 });
             });
 
